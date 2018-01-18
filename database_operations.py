@@ -1,66 +1,148 @@
 import luigi
-import psycopg2
-import sqlite3
 import subprocess
-import sys
 import os
 import datetime
-import pandas
-from sqlalchemy import create_engine
 import logging
-
+import db_functions, misc_functions
+from sqlalchemy import create_engine
+import pandas
 
 class FindSoakDBFiles(luigi.Task):
+    # date parameter - needs to be changed
     date = luigi.DateParameter(default=datetime.date.today())
-    filepath = luigi.Parameter(default='"/dls/labxchem/data/*/lb*/*"')
+
+    # filepath parameter can be changed elsewhere
+    filepath = luigi.Parameter(default="/dls/labxchem/data/*/lb*/*")
 
     def output(self):
         return luigi.LocalTarget(self.date.strftime('soakDBfiles/soakDB_%Y%m%d.txt'))
 
     def run(self):
-        process = subprocess.Popen(str('''find''' + self.filepath +  ''' -maxdepth 4 -path "*/lab36/*" -prune -o -path "*/initial_model/*" -prune -o -path "*/beamline/*" -prune -o -path "*/analysis/*" -prune -o -path "*ackup*" -prune -o -path "*old*" -prune -o -name "soakDBDataFile.sqlite" -print'''),
+        # maybe change to *.sqlite to find renamed files? - this will probably pick up a tonne of backups
+        process = subprocess.Popen(str('''find ''' + self.filepath +  ''' -maxdepth 5 -path "*/lab36/*" -prune -o -path "*/initial_model/*" -prune -o -path "*/beamline/*" -prune -o -path "*/analysis/*" -prune -o -path "*ackup*" -prune -o -path "*old*" -prune -o -path "*TeXRank*" -prune -o -name "soakDBDataFile.sqlite" -print'''),
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
 
+        # run process to find sqlite files
         out, err = process.communicate()
 
-        print out
-        print err
-
+        # write filepaths to file as output
         with self.output().open('w') as f:
             f.write(out)
 
-        f.close()
 
+class CheckFiles(luigi.Task):
+    date = luigi.Parameter(default=datetime.datetime.now().strftime("%Y%m%d%H"))
+    def requires(self):
+        conn, c = db_functions.connectDB()
+        exists = db_functions.table_exists(c, 'soakdb_files')
+        if not exists:
+            return TransferAllFedIDsAndDatafiles()
+        else:
+            return FindSoakDBFiles()
 
-class TransferFedIDs(luigi.Task):
+    def output(self):
+        return luigi.LocalTarget('files_' + str(self.date) + '.checked')
+
+    def run(self):
+        # logfile = self.date.strftime('transfer_logs/CheckFiles_%Y%m%d.txt')
+        # # logging.basicConfig(filename=logfile, level=# logging.DEBUG, format='%(asctime)s %(message)s',
+        #                     datefrmt='%m/%d/%y %H:%M:%S')
+
+        conn, c = db_functions.connectDB()
+        exists = db_functions.table_exists(c, 'soakdb_files')
+
+        checked = []
+
+        # Status codes:-
+        # 0 = new
+        # 1 = changed
+        # 2 = not changed
+
+        if exists:
+            with self.input().open('r') as f:
+                files = f.readlines()
+
+            for filename in files:
+
+                filename_clean = filename.rstrip('\n')
+
+                c.execute('select filename, modification_date from soakdb_files where filename like %s;', (filename_clean,))
+
+                for row in c.fetchall():
+                    if len(row) > 0:
+                        data_file = str(row[0])
+                        checked.append(data_file)
+                        old_mod_date = str(row[1])
+                        current_mod_date = misc_functions.get_mod_date(data_file)
+
+                        if current_mod_date > old_mod_date:
+                            # logging.info(str(data_file) + ' has changed!')
+                            c.execute('UPDATE soakdb_files SET status_code = 1 where filename like %s;', (filename_clean,))
+                            c.execute('UPDATE soakdb_files SET modification_date = %s where filename like %s;', (current_mod_date, filename_clean))
+                            conn.commit()
+                            # start class to add row and kick off process for that file
+                        else:
+                            # logging.info(str(data_file) + ' has not changed!')
+                            c.execute('UPDATE soakdb_files SET status_code = 2 where filename like %s;', (filename_clean,))
+                            conn.commit()
+
+                if filename_clean not in checked:
+                    # logging.info(filename_clean + ' is a new file!')
+                    out, err, proposal = db_functions.pop_soakdb(filename_clean)
+                    db_functions.pop_proposals(proposal)
+                    c.execute('UPDATE soakdb_files SET status_code = 0 where filename like %s;', (filename_clean,))
+
+            c.execute('select filename from soakdb_files;')
+
+            for row in c.fetchall():
+                if str(row[0]) not in checked:
+                    data_file = str(row[0])
+                    file_exists = os.path.isfile(data_file)
+
+                    # if not file_exists:
+                    #     # logging.warning(str(data_file) + ' no longer exists! - notify users!')
+                    #
+                    # else:
+                    #     # logging.error(str(row[0]) + ' : something wrong!')
+
+        exists = db_functions.table_exists(c, 'lab')
+        if not exists:
+            c.execute('UPDATE soakdb_files SET status_code = 0;')
+            conn.commit()
+
+        with self.output().open('w') as f:
+            f.write('')
+
+class TransferAllFedIDsAndDatafiles(luigi.Task):
+    # date parameter for daily run - needs to be changed
+    date = luigi.DateParameter(default=datetime.date.today())
+
+    # needs a list of soakDB files from the same day
     def requires(self):
         return FindSoakDBFiles()
 
+    # output is just a log file
     def output(self):
-        pass
+        return luigi.LocalTarget(self.date.strftime('transfer_logs/fedids_%Y%m%d.txt'))
 
+    # transfers data to a central postgres db
     def run(self):
-        conn = psycopg2.connect('dbname=xchem user=uzw12877 host=localhost')
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS soakdb_files (filename TEXT, modification_date BIGINT, proposal TEXT)'''
-                  )
-        conn.commit()
+        # connect to central postgres db
+        conn, c = db_functions.connectDB()
 
+        # set up # logging
+        logfile = self.date.strftime('transfer_logs/fedids_%Y%m%d.txt')
+        # logging.basicConfig(filename=logfile, level=# logging.DEBUG, format='%(asctime)s %(message)s',
+                            # datefrmt='%m/%d/%y %H:%M:%S')
+
+        # use list from previous step as input to write to postgres
         with self.input().open('r') as database_list:
             for database_file in database_list.readlines():
                 database_file = database_file.replace('\n', '')
-                proposal = database_file.split('/')[5].split('-')[0]
-                proc = subprocess.Popen(str('getent group ' + str(proposal)), stdout=subprocess.PIPE, shell=True)
-                out, err = proc.communicate()
-                modification_date = datetime.datetime.fromtimestamp(os.path.getmtime(database_file)).strftime(
-                    "%Y-%m-%d %H:%M:%S")
-                modification_date = modification_date.replace('-', '')
-                modification_date = modification_date.replace(':', '')
-                modification_date = modification_date.replace(' ', '')
-                c.execute('''INSERT INTO soakdb_files (filename, modification_date, proposal) SELECT %s,%s,%s WHERE NOT EXISTS (SELECT filename, modification_date FROM soakdb_files WHERE filename = %s AND modification_date = %s)''', (database_file, int(modification_date), proposal, database_file, int(modification_date)))
-                conn.commit()
 
-        c.execute('CREATE TABLE IF NOT EXISTS proposals (proposal TEXT, fedids TEXT)')
+                out, err, proposal = db_functions.pop_soakdb(database_file)
+
+                # logging.info(str('FedIDs written for ' + proposal))
 
         proposal_list = []
         c.execute('SELECT proposal FROM soakdb_files')
@@ -69,285 +151,189 @@ class TransferFedIDs(luigi.Task):
             proposal_list.append(str(row[0]))
 
         for proposal_number in set(proposal_list):
-            proc = subprocess.Popen(str('getent group ' + str(proposal_number)), stdout=subprocess.PIPE, shell=True)
-            out, err = proc.communicate()
-            append_list = out.split(':')[3].replace('\n', '')
-
-            c.execute(str('''INSERT INTO proposals (proposal, fedids) SELECT %s, %s WHERE NOT EXISTS (SELECT proposal, fedids FROM proposals WHERE proposal = %s AND fedids = %s);'''), (proposal_number, append_list, proposal_number, append_list))
-            conn.commit()
+            db_functions.pop_proposals(proposal_number)
 
         c.close()
 
+        with self.output().open('w') as f:
+            f.write('TransferFeDIDs DONE')
 
-class TransferExperiment(luigi.Task):
-    date = luigi.DateParameter(default=datetime.date.today())
+
+class TransferChangedDataFile(luigi.Task):
+    data_file = luigi.Parameter()
+    file_id = luigi.Parameter()
 
     def requires(self):
-        return FindSoakDBFiles()
+        return CheckFiles()
 
     def output(self):
         pass
 
     def run(self):
-
-        logfile = self.date.strftime('transfer_logs/transfer_experiment_%Y%m%d.txt')
-        logging.basicConfig(filename=logfile, level=logging.DEBUG, format='%(asctime)s %(message)s', datefrmt='%m/%d/%y %H:%M:%S')
-
-        def create_list_from_ind(row, array, numbers_list):
-            for ind in numbers_list:
-                array.append(row[ind])
-
-        def pop_dict(array, dictionary, dictionary_keys):
-            for i in range(0, len(dictionary_keys)):
-                dictionary[dictionary_keys[i]].append(array[i])
-            return dictionary
-
-        def add_keys(dictionary, keys):
-            for key in keys:
-                dictionary[key] = []
-
-        lab_dict = {}
-        crystal_dict = {}
-        data_collection_dict = {}
-        data_processing_dict = {}
-        dimple_dict = {}
-        refinement_dict = {}
-
-        # define keys for xchem postgres DB
-        lab_dictionary_keys = ['visit', 'library_plate', 'library_name', 'smiles', 'compound_code', 'protein',
-                               'stock_conc', 'expr_conc',
-                               'solv_frac', 'soak_vol', 'soak_status', 'cryo_Stock_frac', 'cryo_frac',
-                               'cryo_transfer_vol', 'cryo_status',
-                               'soak_time', 'harvest_status', 'crystal_name', 'mounting_result', 'mounting_time',
-                               'data_collection_visit']
-
-        crystal_dictionary_keys = ['tag', 'name', 'spacegroup', 'point_group', 'a', 'b', 'c', 'alpha',
-                                   'beta', 'gamma', 'volume', 'crystal_name']
-
-        data_collection_dictionary_keys = ['date', 'outcome', 'wavelength', 'crystal_name']
-
-        data_processing_dictionary_keys = ['image_path', 'program', 'spacegroup', 'unit_cell', 'auto_assigned',
-                                           'res_overall',
-                                           'res_low', 'res_low_inner_shell', 'res_high', 'res_high_15_sigma',
-                                           'res_high_outer_shell',
-                                           'r_merge_overall', 'r_merge_low', 'r_merge_high', 'isig_overall', 'isig_low',
-                                           'isig_high', 'completeness_overall', 'completeness_low', 'completeness_high',
-                                           'multiplicity_overall', 'multiplicity_low', 'multiplicity_high',
-                                           'cchalf_overall',
-                                           'cchalf_low', 'cchalf_high', 'logfile_path', 'mtz_path', 'log_name',
-                                           'mtz_name',
-                                           'original_directory', 'unique_ref_overall', 'lattice', 'point_group',
-                                           'unit_cell_vol',
-                                           'alert', 'score', 'status', 'r_cryst', 'r_free', 'dimple_pdb_path',
-                                           'dimple_mtz_path',
-                                           'dimple_status', 'crystal_name']
-
-        dimple_dictionary_keys = ['res_high', 'r_free', 'pdb_path', 'mtz_path', 'reference_pdb', 'status', 'pandda_run',
-                                  'pandda_hit',
-                                  'pandda_reject', 'pandda_path', 'crystal_name']
-
-        refinement_dictionary_keys = ['res', 'res_TL', 'rcryst', 'rcryst_TL', 'r_free', 'rfree_TL', 'spacegroup',
-                                      'lig_cc', 'rmsd_bonds',
-                                      'rmsd_bonds_TL', 'rmsd_angles', 'rmsd_angles_TL', 'outcome', 'mtz_free', 'cif',
-                                      'cif_status', 'cif_prog',
-                                      'pdb_latest', 'mtz_latest', 'matrix_weight', 'refinement_path', 'lig_confidence',
-                                      'lig_bound_conf', 'bound_conf', 'molprobity_score', 'molprobity_score_TL',
-                                      'ramachandran_outliers', 'ramachandran_outliers_TL', 'ramachandran_favoured',
-                                      'ramachandran_favoured_TL', 'status', 'crystal_name']
+        conn, c = db_functions.connectDB()
+        c.execute('delete from lab where file_id=%s', (self.file_id,))
+        conn.commit()
+        c.execute('delete from refinement where file_id=%s', (self.file_id,))
+        conn.commit()
+        c.execute('delete from dimple where file_id=%s', (self.file_id,))
+        conn.commit()
+        c.execute('delete from data_processing where file_id=%s', (self.file_id,))
+        conn.commit()
+        db_functions.transfer_data(self.data_file)
+        c.execute('UPDATE soakdb_files SET status_code=2 where filename like %s;', (self.data_file,))
+        conn.commit()
 
 
-        dictionaries = [[lab_dict, lab_dictionary_keys], [crystal_dict, crystal_dictionary_keys],
-                        [data_collection_dict, data_collection_dictionary_keys],
-                        [data_processing_dict, data_processing_dictionary_keys],
-                        [dimple_dict, dimple_dictionary_keys], [refinement_dict, refinement_dictionary_keys]]
+class TransferNewDataFile(luigi.Task):
+    data_file = luigi.Parameter()
+    file_id = luigi.Parameter()
 
-        # add keys to dictionaries
-        for dictionary in dictionaries:
-            add_keys(dictionary[0], dictionary[1])
+    def requires(self):
+        return CheckFiles()
 
-        # some filters to get rid of junk
-        soakstatus = 'done'
-        cryostatus = 'pending'
-        mountstatus = '%Mounted%'
-        collectionstatus = '%success%'
-        compsmiles = '%None%'
+    def output(self):
+        pass
 
-        # numbers relating to where selected in query
-        # 17 = number for crystal_name
-        lab_table_numbers = range(0, 21)
+    def run(self):
+        db_functions.transfer_data(self.data_file)
+        conn, c = db_functions.connectDB()
+        c.execute('UPDATE soakdb_files SET status_code=2 where filename like %s;', (self.data_file,))
+        conn.commit()
 
-        crystal_table_numbers = range(22, 33)
-        crystal_table_numbers.insert(len(crystal_table_numbers), 17)
 
-        data_collection_table_numbers = range(33, 36)
-        data_collection_table_numbers.insert(len(data_collection_table_numbers), 17)
+class StartTransfers(luigi.Task):
 
-        data_processing_table_numbers = range(36, 79)
-        data_processing_table_numbers.insert(len(data_processing_table_numbers), 17)
-
-        dimple_table_numbers = range(79, 89)
-        dimple_table_numbers.insert(len(dimple_table_numbers), 17)
-
-        refinement_table_numbers = range(91, 122)
-        refinement_table_numbers.insert(len(refinement_table_numbers), 17)
-
-        # connect to master postgres db
-        conn = psycopg2.connect('dbname=xchem user=uzw12877 host=localhost')
-        c = conn.cursor()
-
-        # get all soakDB file names and close postgres connection
-        c.execute('select filename from soakdb_files')
+    def get_file_list(self, status_code):
+        datafiles = []
+        fileids = []
+        conn, c = db_functions.connectDB()
+        c.execute('SELECT filename, id FROM soakdb_files WHERE status_code = %s', (status_code,))
         rows = c.fetchall()
-        c.close()
-
-        # set database filename from postgres query
         for row in rows:
-            database_file = str(row[0])
+            datafiles.append(str(row[0]))
+            fileids.append(str(row[1]))
 
-            # connect to soakDB
-            conn2 = sqlite3.connect(str(database_file))
-            c2 = conn2.cursor()
+        list = zip(datafiles, fileids)
+        return list
 
-            try:
-                # checks: SoakStatus=Done, CryoStatus!=pending or fail, CrystalName exists, MountingResult contains Mounted
-                # columns with issues: ProjectDirectory, DatePANDDAModelCreated
-                # depo columns
-                # 104/145 currently work... Apply filters, see which ones are actually useful, count again!
-
-                # use dictionaries for tables!
-
-                for row in c2.execute('''select LabVisit, LibraryPlate, LibraryName, CompoundSMILES, CompoundCode,
-                                        ProteinName, CompoundStockConcentration, CompoundConcentration, SolventFraction, 
-                                        SoakTransferVol, SoakStatus, CryoStockFraction, CryoFraction, CryoTransferVolume, 
-                                        CryoStatus, SoakingTime, HarvestStatus, CrystalName, MountingResult, MountingTime, 
-                                        DataCollectionVisit, 
-
-                                        ProjectDirectory, 
-
-                                        CrystalTag, CrystalFormName, CrystalFormSpaceGroup,
-                                        CrystalFormPointGroup, CrystalFormA, CrystalFormB, CrystalFormC,CrystalFormAlpha, 
-                                        CrystalFormBeta, CrystalFormGamma, CrystalFormVolume, 
-
-                                        DataCollectionDate, 
-                                        DataCollectionOutcome, DataCollectionWavelength, 
-
-                                        DataProcessingPathToImageFiles,
-                                        DataProcessingProgram, DataProcessingSpaceGroup, DataProcessingUnitCell,
-                                        DataProcessingAutoAssigned, DataProcessingResolutionOverall, DataProcessingResolutionLow,
-                                        DataProcessingResolutionLowInnerShell, DataProcessingResolutionHigh, 
-                                        DataProcessingResolutionHigh15Sigma, DataProcessingResolutionHighOuterShell, 
-                                        DataProcessingRMergeOverall, DataProcessingRMergeLow, DataProcessingRMergeHigh, 
-                                        DataProcessingIsigOverall, DataProcessingIsigLow, DataProcessingIsigHigh, 
-                                        DataProcessingCompletenessOverall, DataProcessingCompletenessLow,
-                                        DataProcessingCompletenessHigh, DataProcessingMultiplicityOverall, 
-                                        DataProcessingMultiplicityLow, DataProcessingMultiplicityHigh, 
-                                        DataProcessingCChalfOverall, DataProcessingCChalfLow, DataProcessingCChalfHigh, 
-                                        DataProcessingPathToLogFile, DataProcessingPathToMTZfile, DataProcessingLOGfileName, 
-                                        DataProcessingMTZfileName, DataProcessingDirectoryOriginal,
-                                        DataProcessingUniqueReflectionsOverall, DataProcessingLattice, DataProcessingPointGroup,
-                                        DataProcessingUnitCellVolume, DataProcessingAlert, DataProcessingScore,
-                                        DataProcessingStatus, DataProcessingRcryst, DataProcessingRfree, 
-                                        DataProcessingPathToDimplePDBfile, DataProcessingPathToDimpleMTZfile,
-                                        DataProcessingDimpleSuccessful, 
-
-                                        DimpleResolutionHigh, DimpleRfree, DimplePathToPDB,
-                                        DimplePathToMTZ, DimpleReferencePDB, DimpleStatus, DimplePANDDAwasRun, 
-                                        DimplePANDDAhit, DimplePANDDAreject, DimplePANDDApath, 
-
-                                        PANDDAStatus, DatePANDDAModelCreated, 
-
-                                        RefinementResolution, RefinementResolutionTL, 
-                                        RefinementRcryst, RefinementRcrystTraficLight, RefinementRfree, 
-                                        RefinementRfreeTraficLight, RefinementSpaceGroup, RefinementLigandCC, 
-                                        RefinementRmsdBonds, RefinementRmsdBondsTL, RefinementRmsdAngles, RefinementRmsdAnglesTL,
-                                        RefinementOutcome, RefinementMTZfree, RefinementCIF, RefinementCIFStatus, 
-                                        RefinementCIFprogram, RefinementPDB_latest, RefinementMTZ_latest, RefinementMatrixWeight, 
-                                        RefinementPathToRefinementFolder, RefinementLigandConfidence, 
-                                        RefinementLigandBoundConformation, RefinementBoundConformation, RefinementMolProbityScore,
-                                        RefinementMolProbityScoreTL, RefinementRamachandranOutliers, 
-                                        RefinementRamachandranOutliersTL, RefinementRamachandranFavored, 
-                                        RefinementRamachandranFavoredTL, RefinementStatus
-
-                                        from mainTable 
-                                        where SoakStatus = ?
-                                        and CryoStatus not like ? 
-                                        and MountingResult like ? 
-                                        and DataCollectionOutcome like ?
-                                        and CompoundSMILES not like ? ''',
-                                      (soakstatus, cryostatus, mountstatus, collectionstatus, compsmiles)):
-
-                    lab_table_list = []
-                    crystal_table_list = []
-                    data_collection_table_list = []
-                    data_processing_table_list = []
-                    dimple_table_list = []
-                    refinement_table_list = []
-
-                    lists = [lab_table_list, crystal_table_list, data_collection_table_list, data_processing_table_list,
-                             dimple_table_list, refinement_table_list]
-
-                    numbers = [lab_table_numbers, crystal_table_numbers, data_collection_table_numbers,
-                               data_processing_table_numbers, dimple_table_numbers, refinement_table_numbers]
-                    listref = 0
-
-                    for listname in lists:
-                        create_list_from_ind(row, listname, numbers[listref])
-                        listref += 1
-
-                    # populate query return into dictionary, so that it can be turned into a df and transfered to DB
-                    pop_dict(lab_table_list, lab_dict, lab_dictionary_keys)
-                    pop_dict(crystal_table_list, crystal_dict, crystal_dictionary_keys)
-                    pop_dict(refinement_table_list, refinement_dict, refinement_dictionary_keys)
-                    pop_dict(dimple_table_list, dimple_dict, dimple_dictionary_keys)
-                    pop_dict(data_collection_table_list, data_collection_dict,
-                             data_collection_dictionary_keys)
-                    pop_dict(data_processing_table_list, data_processing_dict,
-                             data_processing_dictionary_keys)
-
-
-            except:
-                logging.warning(str('Database file: ' + database_file + ' WARNING: ' + str(sys.exc_info()[1])))
-                c2.close()
-
-        # turn dictionaries into dataframes
-        labdf = pandas.DataFrame.from_dict(lab_dict)
-        # crystaldf = pandas.DataFrame.from_dict(crystal_dict)
-        dataprocdf = pandas.DataFrame.from_dict(data_processing_dict)
-        # datacoldf = pandas.DataFrame.from_dict(data_collection_dict)
-        refdf = pandas.DataFrame.from_dict(refinement_dict)
-        dimpledf = pandas.DataFrame.from_dict(dimple_dict)
-
-        # create an engine to postgres database and populate tables - ids are straight from dataframe index,
-        # but link all together
-        #
-        # TODO:
-        # find way to do update, rather than just create table each time
-        engine = create_engine('postgresql://uzw12877@localhost:5432/xchem')
-        labdf.to_sql('lab', engine, if_exists='replace')
-        # crystaldf.to_sql('crystal', engine, if_exists='replace')
-        dataprocdf.to_sql('data_processing', engine, if_exists='replace')
-        # datacoldf.to_sql('data_collection', engine, if_exists='replace')
-        refdf.to_sql('refinement', engine, if_exists='replace')
-        dimpledf.to_sql('dimple', engine, if_exists='replace')
-
-
-class WriteWhitelists(luigi.Task):
     def requires(self):
-        return TransferFedIDs()
+        try:
+            new_list = self.get_file_list(0)
+            changed_list = self.get_file_list(1)
+            return [TransferNewDataFile(data_file=datafile, file_id=fileid) for (datafile, fileid) in new_list], \
+                   [TransferChangedDataFile(data_file=newfile, file_id=newfileid) for (newfile, newfileid) in changed_list]
+        except:
+            return TransferAllFedIDsAndDatafiles()
 
     def output(self):
-        pass
+        return luigi.LocalTarget('transfers.txt')
 
     def run(self):
-        pass
+        with self.output().open('w') as f:
+            f.write('transfers done')
 
 
-class WriteFedIDList(luigi.Task):
+class FindProjects(luigi.Task):
+    def add_to_postgres(self, table, protein, subset_list, data_dump_dict, title):
+        xchem_engine = create_engine('postgresql://uzw12877@localhost:5432/xchem')
+
+        temp_frame = table.loc[table['protein'] == protein]
+        temp_frame.reset_index(inplace=True)
+        temp2 = temp_frame.drop_duplicates(subset=subset_list)
+
+        try:
+            nodups = db_functions.clean_df_db_dups(temp2, title, xchem_engine,
+                                                   list(data_dump_dict.keys()))
+            nodups.to_sql(title, xchem_engine, if_exists='append')
+        except:
+            temp2.to_sql(title, xchem_engine, if_exists='append')
+
+
     def requires(self):
-        return WriteWhitelists()
+        return StartTransfers()
 
     def output(self):
-        pass
+        return luigi.LocalTarget('findprojects.done')
 
     def run(self):
-        pass
+        # all data necessary for uploading hits
+        crystal_data_dump_dict = {'crystal_name': [], 'protein': [], 'smiles': [], 'bound_conf': [],
+                                  'modification_date': [], 'strucid':[]}
+
+        # all data necessary for uploading leads
+        project_data_dump_dict = {'protein': [], 'pandda_path': [], 'reference_pdb': [], 'strucid':[]}
+
+        outcome_string = '(%3%|%4%|%5%|%6%)'
+
+        conn, c = db_functions.connectDB()
+
+        c.execute('''SELECT crystal_id, bound_conf FROM refinement WHERE outcome SIMILAR TO %s''',
+                  (str(outcome_string),))
+
+        rows = c.fetchall()
+
+        print(str(len(rows)) + ' crystals were found to be in refinement or above')
+
+        for row in rows:
+
+            c.execute('''SELECT smiles, protein FROM lab WHERE crystal_id = %s''', (str(row[0]),))
+
+            lab_table = c.fetchall()
+
+            if len(str(row[0])) < 3:
+                continue
+
+            if len(lab_table) > 1:
+                print('WARNING: ' + str(row[0]) + ' has multiple entries in the lab table')
+                # print lab_table
+
+            for entry in lab_table:
+                if len(str(entry[1])) < 2 or 'None' in str(entry[1]):
+                    protein_name = str(row[0]).split('-')[0]
+                else:
+                    protein_name = str(entry[1])
+
+                if len(str(row[1])) < 5:
+                    print ('No bound conf for ' + str(row[0]))
+                    continue
+
+                crystal_data_dump_dict['protein'].append(protein_name)
+                crystal_data_dump_dict['smiles'].append(entry[0])
+                crystal_data_dump_dict['crystal_name'].append(row[0])
+                crystal_data_dump_dict['bound_conf'].append(row[1])
+                crystal_data_dump_dict['strucid'].append('')
+
+                try:
+                    modification_date = misc_functions.get_mod_date(str(row[1]))
+                except:
+                    modification_date = ''
+
+                crystal_data_dump_dict['modification_date'].append(modification_date)
+
+            c.execute('''SELECT pandda_path, reference_pdb FROM dimple WHERE crystal_id = %s''', (str(row[0]),))
+
+            pandda_info = c.fetchall()
+
+            for pandda_entry in pandda_info:
+                # project_data_dump_dict['crystal_name'].append(row[0])
+                project_data_dump_dict['protein'].append(protein_name)
+                project_data_dump_dict['pandda_path'].append(pandda_entry[0])
+                project_data_dump_dict['reference_pdb'].append(pandda_entry[1])
+                project_data_dump_dict['strucid'].append('')
+
+        project_table = pandas.DataFrame.from_dict(project_data_dump_dict)
+        crystal_table = pandas.DataFrame.from_dict(crystal_data_dump_dict)
+
+        protein_list = set(list(project_data_dump_dict['protein']))
+        print protein_list
+
+        for protein in protein_list:
+
+            self.add_to_postgres(project_table, protein, ['reference_pdb'], project_data_dump_dict, 'proasis_leads')
+
+            self.add_to_postgres(crystal_table, protein, ['crystal_name', 'smiles', 'bound_conf'],
+                                 crystal_data_dump_dict, 'proasis_hits')
+
+        with self.output().open('wb') as f:
+            f.write('')
+
