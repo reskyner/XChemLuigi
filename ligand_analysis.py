@@ -3,21 +3,19 @@ import data_in_proasis
 import data_analysis_functions as daf
 import db_functions as dbf
 import pandas
-import os
 
 class EdstatsScores(luigi.Task):
     strucid = luigi.Parameter()
     crystal = luigi.Parameter()
 
     def output(self):
-        filename = str('./edstats/' + str(self.crystal) + '_' + str(self.strucid) + '.done')
+        filename = str('./edstats' + self.crystal + '_' + self.strucid + '.done')
         return luigi.LocalTarget(filename)
 
     def run(self):
         results_dict = {'crystal': [], 'strucid': [], 'ligand': []}
 
         output_data, header = daf.run_edstats(self.strucid)
-
         if output_data:
             for ligand in output_data:
 
@@ -31,16 +29,16 @@ class EdstatsScores(luigi.Task):
                 results_dict['crystal'].append(self.crystal)
                 results_dict['strucid'].append(self.strucid)
 
+<<<<<<< HEAD
         #else:
             #raise Exception('No output data was found...')
 
+=======
+>>>>>>> parent of 2ac6350... changed my own permissions in blacklist, exception handling for edstats classes
         data_frame = pandas.DataFrame.from_dict(results_dict)
+        # data_frame.to_csv('edstats_proasis_ligands.csv')
+        # print data_frame
 
-        xchem_engine = dbf.create_engine('postgresql://uzw12877@localhost:5432/xchem')
-        data_frame.to_sql('ligand_edstats', xchem_engine, if_exists='append')
-
-        with self.output().open('wb') as f:
-            f.write('')
 
 class StartEdstatsScores(luigi.Task):
 
@@ -53,11 +51,8 @@ class StartEdstatsScores(luigi.Task):
         strucid_list=[]
 
         for row in rows:
-            crystal = str(row[0])
-            strucid = str(row[1])
-            if not os.path.isfile(str('./edstats/' + str(crystal) + '_' + str(strucid) + '.done')):
-                crystal_list.append(crystal)
-                strucid_list.append(strucid)
+            crystal_list.append(str(row[0]))
+            strucid_list.append(str(row[1]))
 
         list = zip(crystal_list, strucid_list)
 

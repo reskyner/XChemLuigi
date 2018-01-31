@@ -26,7 +26,7 @@ class StartLeadTransfers(luigi.Task):
             '''pandda_path !='None' and reference_pdb !='' and reference_pdb !='None' ''')
         rows = c.fetchall()
         for row in rows:
-            if not os.path.isfile(str('./leads/' + str(row[1]) + '_' + misc_functions.get_mod_date(str(row[1])) + '.added')):
+            if not os.path.isfile(str('./leads/' + str(row[1]) + '.added')):
                 path_list.append(str(row[0]))
                 protein_list.append(str(row[1]))
                 reference_list.append(str(row[2]))
@@ -70,7 +70,7 @@ class StartHitTransfers(luigi.Task):
             '''bound_conf !='' and bound_conf !='None' and modification_date !='' and modification_date !='None' ''')
         rows = c.fetchall()
         for row in rows:
-            if not os.path.isfile(str('./hits/' + str(row[1]) + '_' + str(row[4]) + '.added')):
+            #if not os.path.isfile(str('./hits/' + str(row[1]) + '_' + str(row[4]) + '.added')):
                 bound_list.append(str(row[0]))
                 crystal_list.append(str(row[1]))
                 protein_list.append(str(row[2]))
@@ -84,10 +84,7 @@ class StartHitTransfers(luigi.Task):
     def requires(self):
         try:
             list = self.get_list()
-            return [HitTransfer(bound_pdb=pdb, crystal=crystal_name,
-                                protein_name=protein_name, smiles=smiles_string,
-                                mod_date=modification_string) for
-                    (pdb, crystal_name, protein_name, smiles_string, modification_string) in list]
+            return [HitTransfer(bound_pdb=pdb, crystal=crystal_name, protein_name=protein_name, smiles=smiles_string, mod_date=modification_string) for (pdb, crystal_name, protein_name, smiles_string, modification_string) in list]
         except:
             return database_operations.CheckFiles(), database_operations.FindProjects()
 
@@ -466,9 +463,6 @@ class WriteBlackLists(luigi.Task):
         with open('/usr/local/Proasis2/Data/BLACKLIST/other_user.dat', 'w') as f:
             wr = csv.writer(f)
             wr.writerow(strucids)
-
-        with open(str(directory_path + '/uzw12877.dat'),'w') as f:
-            f.write('')
 
         with self.output().open('wb') as f:
             f.write('')

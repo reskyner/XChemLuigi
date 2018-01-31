@@ -15,20 +15,13 @@ def run_edstats(strucid):
     mtz_file = paf.get_struc_mtz(strucid, '.')
     if mtz_file:
         pdb_file = paf.get_struc_pdb(strucid, str(strucid + '.pdb'))
-        print pdb_file
         if pdb_file:
             print('writing temporary edstats output...')
-            edstats_name = str('edstats_' + str(strucid) + '.out')
             os.system('source /dls/science/groups/i04-1/software/pandda-update/ccp4/ccp4-7.0/bin/ccp4.setup-sh; '
-                      'edstats.pl -hklin=' + mtz_file + ' -xyzin=' + pdb_file + ' -out=' + edstats_name + ' > temp.out'
-                                                                                                          ' > /dev/null 2>&1')
+                      'edstats.pl -hklin=' + mtz_file + ' -xyzin=' + pdb_file + ' -out=edstats.out > temp.out')
             # print('reading temporary edstats output...')
-            if os.path.isfile(edstats_name):
-                with open(edstats_name, 'r') as f:
-                    output = f.read().strip().replace('\r\n', '\n').replace('\r', '\n').splitlines()
-            else:
-                output=None
-                raise Exception('No edstats output file found!')
+            with open('edstats.out', 'r') as f:
+                output = f.read().strip().replace('\r\n', '\n').replace('\r', '\n').splitlines()
 
             if output:
                 header = output.pop(0).split()
@@ -42,11 +35,10 @@ def run_edstats(strucid):
             outputdata = []
 
             # Process the rest of the data
-            if output:
-                for line in output:
-                    line = line.strip()
-                    if not line:
-                        continue
+            for line in output:
+                line = line.strip()
+                if not line:
+                    continue
 
                     fields = line.split()
                     if len(fields) != num_fields:
@@ -72,6 +64,7 @@ def run_edstats(strucid):
                             try:
                                 fields[i] = int(x)
                             except:
+<<<<<<< HEAD
                                 try:
                                     fields[i] = float(x)
                                 except:
@@ -88,9 +81,16 @@ def run_edstats(strucid):
                 os.system('rm ' + mtz_file + '.gz')
             except:
                 print('problem removing files')
+=======
+                                fields[i] = x
 
-            raise Exception('No pdb file found for ' + strucid + ' so not running edstats!')
+                # print residue
+                if 'LIG' in residue:
+                    outputdata.append([[residue, chain, resnum], fields])
+>>>>>>> parent of 2ac6350... changed my own permissions in blacklist, exception handling for edstats classes
+
     else:
+<<<<<<< HEAD
         try:
             os.system('rm ' + mtz_file)
             os.system('rm ' + mtz_file + '.gz')
@@ -98,12 +98,18 @@ def run_edstats(strucid):
             print('problem removing files')
 
         raise Exception('No mtz file found for ' + strucid + ' so not running edstats!')
+=======
+        pdb_file = None
+        outputdata = None
+        header = None
+        print('No mtz file found for ' + strucid + ' so not running edstats!')
+>>>>>>> parent of 2ac6350... changed my own permissions in blacklist, exception handling for edstats classes
 
     try:
         os.system('rm ' + pdb_file)
         os.system('rm ' + mtz_file)
         os.system('rm ' + mtz_file + '.gz')
-        os.system('rm ' + edstats_name)
+        os.system('rm edstats.out')
     except:
         print('problem removing files')
 

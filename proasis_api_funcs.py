@@ -1,5 +1,5 @@
 import requests
-import os, sys
+import os
 
 def get_json(url):
     # send API request and pull output as json
@@ -77,11 +77,7 @@ def get_struc_mtz(strucid, out_dir):
     filename = None
     for entry in file_dict['allfiles']:
         if 'STRUCFACMTZFILE' in entry['filetype']:
-            if len(entry['filename']) < 2:
-                raise Exception(str("The filename for mtz was not right... " + str(file_dict)))
             filename = str(entry['filename'])
-        #else:
-            #raise Exception("No mtz file was found by proasis: " + str(file_dict['allfiles']))
     if filename:
         print 'moving stuff...'
         os.system('cp ' + filename + ' ' + out_dir)
@@ -97,7 +93,6 @@ def get_struc_pdb(strucid, outfile):
     url = str('http://cs04r-sc-vserv-137.diamond.ac.uk/proasisapi/v1.4/fetchfile/originalpdb/' + strucid)
     json_string = get_json(url)
     file_dict = dict_from_string(json_string)
-    print file_dict
     if os.path.isfile(outfile):
         os.system('rm ' + outfile)
 
@@ -108,6 +103,6 @@ def get_struc_pdb(strucid, outfile):
             for line in file_dict['output']:
                 f.write(line)
         except:
-            outfile = None
+            output = None
     return outfile
 

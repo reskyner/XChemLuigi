@@ -17,8 +17,6 @@ class FindSoakDBFiles(luigi.Task):
         return luigi.LocalTarget(self.date.strftime('soakDBfiles/soakDB_%Y%m%d.txt'))
 
     def run(self):
-        os.system('./pg_backup.sh')
-
         # maybe change to *.sqlite to find renamed files? - this will probably pick up a tonne of backups
         process = subprocess.Popen(str('''find ''' + self.filepath +  ''' -maxdepth 5 -path "*/lab36/*" -prune -o -path "*/initial_model/*" -prune -o -path "*/beamline/*" -prune -o -path "*/analysis/*" -prune -o -path "*ackup*" -prune -o -path "*old*" -prune -o -path "*TeXRank*" -prune -o -name "soakDBDataFile.sqlite" -print'''),
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
